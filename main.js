@@ -18,16 +18,14 @@ start_button.addEventListener("click", function () {
       let finalTranscript = "";
       let interimTranscript = "";
 
-      // Loop through the results to get final and interim results
       Array.from(e.results).forEach((result) => {
         if (result.isFinal) {
-          finalTranscript += result[0].transcript; // Finalized speech
+          finalTranscript += result[0].transcript; 
         } else {
-          interimTranscript += result[0].transcript; // Ongoing speech
+          interimTranscript += result[0].transcript; 
         }
       });
 
-      // Append only finalized text to the textarea
       if (finalTranscript) {
         converted_text.value += finalTranscript + " ";
       }
