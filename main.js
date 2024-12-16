@@ -10,7 +10,7 @@ let isListening = false;
 start_button.addEventListener("click", function () {
   if (!isListening) {
     window.SpeechRecognition =
-    window.SpeechRecognition || window.webkitSpeechRecognition;
+      window.SpeechRecognition || window.webkitSpeechRecognition;
     recognition = new SpeechRecognition();
     recognition.interimResults = true;
 
@@ -19,7 +19,8 @@ start_button.addEventListener("click", function () {
         .map((result) => result[0])
         .map((result) => result.transcript)
         .join("");
-      converted_text.value = transcript; 
+     
+      converted_text.value += transcript;
     });
 
     recognition.addEventListener("end", () => {
