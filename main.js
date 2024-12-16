@@ -15,12 +15,22 @@ start_button.addEventListener("click", function () {
     recognition.interimResults = true;
 
     recognition.addEventListener("result", (e) => {
-      const transcript = Array.from(e.results)
-        .map((result) => result[0])
-        .map((result) => result.transcript)
-        .join("");
-     
-      converted_text.value += transcript;
+      let finalTranscript = "";
+      let interimTranscript = "";
+
+      // Loop through the results to get final and interim results
+      Array.from(e.results).forEach((result) => {
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript; // Finalized speech
+        } else {
+          interimTranscript += result[0].transcript; // Ongoing speech
+        }
+      });
+
+      // Append only finalized text to the textarea
+      if (finalTranscript) {
+        converted_text.value += finalTranscript + " ";
+      }
     });
 
     recognition.addEventListener("end", () => {
