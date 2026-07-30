@@ -3,24 +3,156 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0b16" />
+    <meta
+      name="description"
+      content="Flowrite — turn your voice into text live, in any language."
+    />
     <link rel="icon" href="logo.png" type="image/png" sizes="16x16" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="styles.css" />
-    <title>Flowrite</title>
+    <title>Flowrite — Voice to Text, Live</title>
   </head>
   <body>
-    <div class="voice_to_text">
-      <h1>Flowrite: Seamlessly Convert Voice to Text</h1>
-      <textarea
-        id="converted_text"
-        placeholder="Your transcriptions will appear here..."
-      ></textarea>
-      <div id="buttons">
-        <button id="start_button">Start</button>
-        <button id="stop_button">Stop</button>
-        <button id="copy_button">Copy</button>
-        <button id="clear_button">Clear</button>
-      </div>
+    <!-- animated ambient background -->
+    <div class="aurora" aria-hidden="true">
+      <span class="blob blob-1"></span>
+      <span class="blob blob-2"></span>
+      <span class="blob blob-3"></span>
     </div>
+
+    <main class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+              <path
+                d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"
+                fill="currentColor"
+              />
+            </svg>
+          </span>
+          <div class="brand-text">
+            <h1>Flowrite</h1>
+            <p>Speak. Watch it write itself.</p>
+          </div>
+        </div>
+
+        <div class="lang-picker">
+          <label for="lang_select" class="sr-only">Recognition language</label>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6" />
+            <path
+              d="M3 12h18M12 3c2.5 2.5 3.8 5.7 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3z"
+              stroke="currentColor"
+              stroke-width="1.6"
+            />
+          </svg>
+          <select id="lang_select" aria-label="Recognition language"></select>
+        </div>
+      </header>
+
+      <!-- editor -->
+      <section class="editor-wrap">
+        <div
+          id="converted_text"
+          class="editor"
+          contenteditable="true"
+          role="textbox"
+          aria-multiline="true"
+          aria-label="Transcribed text"
+          spellcheck="false"
+        ></div>
+        <p id="placeholder" class="placeholder">
+          Hit the mic and start talking — your words appear here, in the
+          language you speak.
+        </p>
+
+        <div class="editor-status">
+          <span id="status_pill" class="status-pill idle">
+            <span class="dot"></span>
+            <span id="status_text">Idle</span>
+          </span>
+          <span id="counter" class="counter">0 words · 0 chars</span>
+        </div>
+      </section>
+
+      <!-- controls -->
+      <div class="controls">
+        <div class="primary-controls">
+          <button
+            id="start_button"
+            class="icon-btn record"
+            type="button"
+            aria-label="Start recording"
+            title="Record"
+          >
+            <span class="pulse-ring"></span>
+            <span class="pulse-ring delay"></span>
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
+              <rect x="9" y="2.5" width="6" height="12" rx="3" fill="currentColor" />
+              <path
+                d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+
+          <button
+            id="stop_button"
+            class="icon-btn stop"
+            type="button"
+            aria-label="Stop recording"
+            title="Stop"
+            disabled
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+              <rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="secondary-controls">
+          <button id="copy_button" class="ghost-btn" type="button" title="Copy">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+              <rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.7" />
+              <path d="M5 15V6a2 2 0 0 1 2-2h9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+            </svg>
+            <span>Copy</span>
+          </button>
+
+          <button id="download_button" class="ghost-btn" type="button" title="Download">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+              <path d="M12 4v10m0 0 4-4m-4 4-4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M5 19h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+            </svg>
+            <span>Save</span>
+          </button>
+
+          <button id="clear_button" class="ghost-btn danger" type="button" title="Clear">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+              <path d="M5 7h14M10 7V5.5A1.5 1.5 0 0 1 11.5 4h1A1.5 1.5 0 0 1 14 5.5V7m-7 0 1 12.5A1.5 1.5 0 0 0 9.5 21h5a1.5 1.5 0 0 0 1.5-1.5L17 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <span>Clear</span>
+          </button>
+        </div>
+      </div>
+
+      <p id="unsupported" class="unsupported" hidden>
+        ⚠️ Speech recognition isn't supported in this browser. Try Chrome, Edge,
+        or another Chromium-based browser.
+      </p>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="main.js"></script>
   </body>
-  <script src="main.js"></script>
 </html>
