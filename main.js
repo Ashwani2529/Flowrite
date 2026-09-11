@@ -68,12 +68,19 @@ LANGUAGES.forEach((l) => {
   langSelect.value = (exact || partial || LANGUAGES[0]).code;
 })();
 
-/* ---- State ---- */
+/* ---- State ----
+   committedText : finals from previous recognition sessions + manual edits
+   sessionText   : finals from the CURRENT recognition session (rebuilt, never appended)
+   interimText   : live, not-yet-final words                                  */
 let recognition = null;
 let isListening = false;
 let manualStop = false;
-let finalText = "";
+let committedText = "";
+let sessionText = "";
 let interimText = "";
+let restartTimer = null;
+let restartBurst = 0;
+let lastRestartAt = 0;
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -82,14 +89,32 @@ if (!SpeechRecognition) {
   startBtn.disabled = true;
 }
 
+/* Languages that don't put spaces between words */
+const NO_SPACE_LANG = /^(zh|ja|ko|th|km|lo|my)/i;
+
+function needsSpace(base) {
+  return !!base && !/\s$/.test(base) && !NO_SPACE_LANG.test(langSelect.value);
+}
+
+function joinText(base, addition) {
+  if (!addition) return base;
+  if (!base) return addition;
+  return needsSpace(base) ? base + " " + addition : base + addition;
+}
+
+function transcript() {
+  return joinText(committedText, sessionText);
+}
+
 /* ---- Rendering ---- */
 function render() {
+  const base = transcript();
   editor.innerHTML = "";
-  if (finalText) editor.appendChild(document.createTextNode(finalText));
+  if (base) editor.appendChild(document.createTextNode(base));
   if (interimText) {
     const span = document.createElement("span");
     span.className = "interim";
-    span.textContent = interimText;
+    span.textContent = (needsSpace(base) ? " " : "") + interimText;
     editor.appendChild(span);
   }
   if (isListening) {
@@ -102,7 +127,7 @@ function render() {
 }
 
 function updateMeta() {
-  const text = (finalText + interimText).trim();
+  const text = joinText(transcript(), interimText).trim();
   placeholder.classList.toggle("hidden", text.length > 0 || isListening);
   const words = text ? text.split(/\s+/).filter(Boolean).length : 0;
   counter.textContent = `${words} word${words === 1 ? "" : "s"} · ${text.length} chars`;
@@ -120,60 +145,125 @@ function setStatus(state) {
 }
 
 /* ---- Recognition control ---- */
-function startRecognition() {
-  if (!SpeechRecognition || isListening) return;
 
-  recognition = new SpeechRecognition();
-  recognition.lang = langSelect.value;
-  recognition.continuous = true;
-  recognition.interimResults = true;
+/* Fold the current session (plus anything still interim) into committedText.
+   Called when a session ends, so the next session starts from a clean slate. */
+function commitSession() {
+  // Retire the instance: once its words are in committedText, a late "result"
+  // event from it must not re-add them.
+  if (recognition) recognition.closed = true;
 
-  recognition.addEventListener("result", (e) => {
+  const pending = interimText.trim();
+  if (sessionText) {
+    committedText = joinText(committedText, sessionText);
+    sessionText = "";
+  }
+  if (pending) {
+    committedText = joinText(committedText, pending);
+  }
+  interimText = "";
+}
+
+function createRecognition() {
+  const rec = new SpeechRecognition();
+  rec.lang = langSelect.value;
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+
+  rec.addEventListener("result", (e) => {
+    if (rec !== recognition || rec.closed) return; // superseded or already committed
+
+    /* Rebuild the whole session from e.results every time instead of appending.
+       Chrome re-delivers results that are already final (and resultIndex does
+       not always advance), so appending per event duplicates words —
+       "okay so there's a requirement" became "okay okay okay, so, okay…".
+       Rebuilding is idempotent: a word can never be counted twice. */
+    let finals = "";
     let interim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
+    for (let i = 0; i < e.results.length; i++) {
       const r = e.results[i];
-      if (r.isFinal) {
-        let t = r[0].transcript.trim();
-        if (t) {
-          if (finalText && !/\s$/.test(finalText)) finalText += " ";
-          finalText += t;
-        }
-      } else {
-        interim += r[0].transcript;
-      }
+      const t = r[0] ? r[0].transcript : "";
+      if (!t) continue;
+      if (r.isFinal) finals = joinText(finals, t.trim());
+      else interim += t;
     }
-    interimText = interim;
+
+    sessionText = finals;
+    interimText = interim.replace(/^\s+/, "");
+    restartBurst = 0; // audio is flowing — reset the restart backoff
     render();
   });
 
-  recognition.addEventListener("error", (e) => {
+  rec.addEventListener("error", (e) => {
+    if (rec !== recognition) return;
     if (e.error === "not-allowed" || e.error === "service-not-allowed") {
       showToast("🎙️ Microphone access blocked. Allow it in your browser.");
       manualStop = true;
-      stopUI();
-    } else if (e.error === "no-speech") {
-      // ignore; onend will auto-restart
+    } else if (e.error === "audio-capture") {
+      showToast("🎙️ No microphone found.");
+      manualStop = true;
     }
+    /* no-speech / aborted / network are normal during pauses —
+       ignore them and let the "end" handler restart the session. */
   });
 
-  recognition.addEventListener("end", () => {
-    // Chrome ends the session periodically — restart unless the user stopped.
+  rec.addEventListener("end", () => {
+    if (rec !== recognition || rec.closed) return; // stopRecognition already committed
+    commitSession();
     if (isListening && !manualStop) {
-      try {
-        recognition.start();
-      } catch (_) {
-        /* already starting */
-      }
+      // A pause (or Chrome's periodic cutoff) must NOT end the listening
+      // session — spin up a fresh instance and keep going.
+      scheduleRestart();
+      render();
     } else {
       stopUI();
     }
   });
 
+  return rec;
+}
+
+function scheduleRestart(delay = 150) {
+  clearTimeout(restartTimer);
+
+  const now = Date.now();
+  restartBurst = now - lastRestartAt < 800 ? restartBurst + 1 : 0;
+  lastRestartAt = now;
+  if (restartBurst > 12) {
+    // The mic is failing to open, not just pausing — don't spin forever.
+    showToast("🎙️ Mic keeps dropping — stopped listening.");
+    manualStop = true;
+    stopUI();
+    return;
+  }
+
+  restartTimer = setTimeout(() => {
+    if (!isListening || manualStop) return;
+    recognition = createRecognition();
+    try {
+      recognition.start();
+    } catch (_) {
+      scheduleRestart(500);
+    }
+  }, delay);
+}
+
+function startRecognition() {
+  if (!SpeechRecognition || isListening) return;
+
   manualStop = false;
   isListening = true;
+  restartBurst = 0;
+  sessionText = "";
+  interimText = "";
+
+  recognition = createRecognition();
   try {
     recognition.start();
-  } catch (_) {}
+  } catch (_) {
+    scheduleRestart(300);
+  }
 
   startBtn.classList.add("is-recording");
   startBtn.setAttribute("aria-label", "Pause recording");
@@ -187,9 +277,10 @@ function startRecognition() {
 function stopRecognition() {
   manualStop = true;
   isListening = false;
+  clearTimeout(restartTimer);
   if (recognition) {
     try {
-      recognition.stop();
+      recognition.stop(); // stop(), not abort() — lets pending words finalize
     } catch (_) {}
   }
   stopUI();
@@ -197,12 +288,8 @@ function stopRecognition() {
 
 function stopUI() {
   isListening = false;
-  // fold any pending interim text into the final transcript
-  if (interimText.trim()) {
-    if (finalText && !/\s$/.test(finalText)) finalText += " ";
-    finalText += interimText.trim();
-    interimText = "";
-  }
+  clearTimeout(restartTimer);
+  commitSession();
   startBtn.classList.remove("is-recording");
   startBtn.setAttribute("aria-label", "Start recording");
   stopBtn.disabled = true;
@@ -230,7 +317,7 @@ startBtn.addEventListener("click", () => {
 stopBtn.addEventListener("click", stopRecognition);
 
 copyBtn.addEventListener("click", () => {
-  const text = finalText.trim();
+  const text = joinText(transcript(), interimText).trim();
   if (!text) return showToast("Nothing to copy yet.");
   navigator.clipboard
     .writeText(text)
@@ -239,7 +326,7 @@ copyBtn.addEventListener("click", () => {
 });
 
 downloadBtn.addEventListener("click", () => {
-  const text = finalText.trim();
+  const text = joinText(transcript(), interimText).trim();
   if (!text) return showToast("Nothing to save yet.");
   const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -252,18 +339,21 @@ downloadBtn.addEventListener("click", () => {
 });
 
 clearBtn.addEventListener("click", () => {
-  if (!finalText && !interimText) return;
-  finalText = "";
+  if (!transcript() && !interimText) return;
+  committedText = "";
+  sessionText = "";
   interimText = "";
   render();
   showToast("🧹 Cleared");
   editor.focus();
 });
 
-/* Keep finalText in sync when the user edits manually (only when idle) */
+/* Keep the transcript in sync when the user edits manually (only when idle) */
 editor.addEventListener("input", () => {
   if (isListening) return;
-  finalText = editor.innerText;
+  committedText = editor.innerText;
+  sessionText = "";
+  interimText = "";
   updateMeta();
 });
 
