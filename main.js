@@ -69,14 +69,16 @@ LANGUAGES.forEach((l) => {
 })();
 
 /* ---- State ----
-   committedText : finals from previous recognition sessions + manual edits
-   sessionText   : finals from the CURRENT recognition session (rebuilt, never appended)
-   interimText   : live, not-yet-final words                                  */
+   The transcript is kept as a list of segments, not one string, so a segment
+   can be *revised* in place when the engine sends a better version of it.
+     committedSegs : finalised in earlier recognition sessions + manual edits
+     sessionSegs   : final segments of the CURRENT recognition session
+     interimText   : live words, not final yet                               */
 let recognition = null;
 let isListening = false;
 let manualStop = false;
-let committedText = "";
-let sessionText = "";
+let committedSegs = [];
+let sessionSegs = [];
 let interimText = "";
 let restartTimer = null;
 let restartBurst = 0;
@@ -88,6 +90,8 @@ if (!SpeechRecognition) {
   unsupported.hidden = false;
   startBtn.disabled = true;
 }
+
+/* ---- Text helpers ---- */
 
 /* Languages that don't put spaces between words */
 const NO_SPACE_LANG = /^(zh|ja|ko|th|km|lo|my)/i;
@@ -102,19 +106,94 @@ function joinText(base, addition) {
   return needsSpace(base) ? base + " " + addition : base + addition;
 }
 
-function transcript() {
-  return joinText(committedText, sessionText);
+/* Normalised word list. Case and punctuation are ignored so that an engine
+   revising "okay" into "Okay, so…" is still seen as the same utterance. */
+const PUNCT = /[.,!?;:…"'’`“”()\[\]{}<>\-–—_/\\|]+/g;
+
+function tokenize(text) {
+  return text.toLowerCase().replace(PUNCT, " ").split(/\s+/).filter(Boolean);
+}
+
+function makeSeg(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return null;
+  const tokens = tokenize(trimmed);
+  if (!tokens.length) return null;
+  return { text: trimmed, tokens };
+}
+
+/* Is token list a a prefix of token list b? */
+function isPrefix(a, b) {
+  if (a.length > b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/* Append a segment, collapsing cumulative snapshots of the same utterance.
+
+   Chrome revises a single result in place as you speak. Edge and the newer
+   on-device engines instead push a NEW result for every update, each one a
+   full snapshot of the utterance so far:
+     "my" / "my name" / "my name is" / … / "my name is Ashwani Kumar Singh"
+   Concatenating those is what produced
+     "my my name my name is my name is … my name is Ashwani Kumar Singh".
+   So a segment that extends (or merely repeats) the previous one replaces it
+   instead of stacking on top of it. Genuinely new speech shares no prefix
+   with what came before, so it still gets appended. */
+function pushSeg(list, seg) {
+  if (!seg) return list;
+  const prev = list[list.length - 1];
+  if (prev) {
+    if (isPrefix(prev.tokens, seg.tokens)) {
+      list[list.length - 1] = seg; // longer snapshot of the same utterance
+      return list;
+    }
+    if (isPrefix(seg.tokens, prev.tokens)) return list; // stale, shorter snapshot
+  }
+  list.push(seg);
+  return list;
+}
+
+function segsToText(list) {
+  return list.reduce((acc, s) => joinText(acc, s.text), "");
+}
+
+/* Committed + current session, with snapshot collapsing across the boundary
+   (a session restart can re-deliver the tail of the previous one). */
+function allSegs() {
+  const out = committedSegs.slice();
+  sessionSegs.forEach((s) => pushSeg(out, s));
+  return out;
+}
+
+/* What to paint: settled text, plus the live interim tail. If the interim is
+   a longer snapshot of the last settled segment, that segment is replaced by
+   it rather than shown twice. */
+function textParts() {
+  const segs = allSegs();
+  let live = makeSeg(interimText);
+  if (live) {
+    const prev = segs[segs.length - 1];
+    if (prev && isPrefix(prev.tokens, live.tokens)) segs.pop();
+    else if (prev && isPrefix(live.tokens, prev.tokens)) live = null;
+  }
+  return { base: segsToText(segs), live: live ? live.text : "" };
+}
+
+function fullText() {
+  const { base, live } = textParts();
+  return joinText(base, live).trim();
 }
 
 /* ---- Rendering ---- */
 function render() {
-  const base = transcript();
+  const { base, live } = textParts();
   editor.innerHTML = "";
   if (base) editor.appendChild(document.createTextNode(base));
-  if (interimText) {
+  if (live) {
     const span = document.createElement("span");
     span.className = "interim";
-    span.textContent = (needsSpace(base) ? " " : "") + interimText;
+    span.textContent = (needsSpace(base) ? " " : "") + live;
     editor.appendChild(span);
   }
   if (isListening) {
@@ -127,7 +206,7 @@ function render() {
 }
 
 function updateMeta() {
-  const text = joinText(transcript(), interimText).trim();
+  const text = fullText();
   placeholder.classList.toggle("hidden", text.length > 0 || isListening);
   const words = text ? text.split(/\s+/).filter(Boolean).length : 0;
   counter.textContent = `${words} word${words === 1 ? "" : "s"} · ${text.length} chars`;
@@ -146,22 +225,29 @@ function setStatus(state) {
 
 /* ---- Recognition control ---- */
 
-/* Fold the current session (plus anything still interim) into committedText.
-   Called when a session ends, so the next session starts from a clean slate. */
+/* Fold the current session into committedSegs so the next session (after a
+   pause) starts from a clean slate. */
 function commitSession() {
-  // Retire the instance: once its words are in committedText, a late "result"
-  // event from it must not re-add them.
+  // Retire the instance: once its words are committed, a late "result" event
+  // from it must not re-add them.
   if (recognition) recognition.closed = true;
 
-  const pending = interimText.trim();
-  if (sessionText) {
-    committedText = joinText(committedText, sessionText);
-    sessionText = "";
-  }
-  if (pending) {
-    committedText = joinText(committedText, pending);
-  }
+  const merged = allSegs();
+  pushSeg(merged, makeSeg(interimText));
+  committedSegs = merged;
+  sessionSegs = [];
   interimText = "";
+}
+
+/* Tokenising every result on every event would be O(n²) over a long
+   dictation, so cache per result index and only redo it when the text moves. */
+function segForResult(rec, i, raw) {
+  const cache = rec.segCache || (rec.segCache = []);
+  const hit = cache[i];
+  if (hit && hit.raw === raw) return hit.seg;
+  const seg = makeSeg(raw);
+  cache[i] = { raw, seg };
+  return seg;
 }
 
 function createRecognition() {
@@ -174,23 +260,21 @@ function createRecognition() {
   rec.addEventListener("result", (e) => {
     if (rec !== recognition || rec.closed) return; // superseded or already committed
 
-    /* Rebuild the whole session from e.results every time instead of appending.
-       Chrome re-delivers results that are already final (and resultIndex does
-       not always advance), so appending per event duplicates words —
-       "okay so there's a requirement" became "okay okay okay, so, okay…".
-       Rebuilding is idempotent: a word can never be counted twice. */
-    let finals = "";
-    let interim = "";
+    /* Rebuild the session from the whole results list every time rather than
+       appending from e.resultIndex: engines re-deliver results that are
+       already final, and resultIndex doesn't always advance. Rebuilding is
+       idempotent — a word can't be counted twice however often it's resent. */
+    const finals = [];
+    const interims = [];
     for (let i = 0; i < e.results.length; i++) {
       const r = e.results[i];
-      const t = r[0] ? r[0].transcript : "";
-      if (!t) continue;
-      if (r.isFinal) finals = joinText(finals, t.trim());
-      else interim += t;
+      const seg = segForResult(rec, i, r[0] ? r[0].transcript : "");
+      if (!seg) continue;
+      pushSeg(r.isFinal ? finals : interims, seg);
     }
 
-    sessionText = finals;
-    interimText = interim.replace(/^\s+/, "");
+    sessionSegs = finals;
+    interimText = segsToText(interims);
     restartBurst = 0; // audio is flowing — reset the restart backoff
     render();
   });
@@ -212,7 +296,7 @@ function createRecognition() {
     if (rec !== recognition || rec.closed) return; // stopRecognition already committed
     commitSession();
     if (isListening && !manualStop) {
-      // A pause (or Chrome's periodic cutoff) must NOT end the listening
+      // A pause (or the engine's periodic cutoff) must NOT end the listening
       // session — spin up a fresh instance and keep going.
       scheduleRestart();
       render();
@@ -255,7 +339,7 @@ function startRecognition() {
   manualStop = false;
   isListening = true;
   restartBurst = 0;
-  sessionText = "";
+  sessionSegs = [];
   interimText = "";
 
   recognition = createRecognition();
@@ -280,7 +364,7 @@ function stopRecognition() {
   clearTimeout(restartTimer);
   if (recognition) {
     try {
-      recognition.stop(); // stop(), not abort() — lets pending words finalize
+      recognition.stop(); // stop(), not abort() — lets pending words finalise
     } catch (_) {}
   }
   stopUI();
@@ -317,7 +401,7 @@ startBtn.addEventListener("click", () => {
 stopBtn.addEventListener("click", stopRecognition);
 
 copyBtn.addEventListener("click", () => {
-  const text = joinText(transcript(), interimText).trim();
+  const text = fullText();
   if (!text) return showToast("Nothing to copy yet.");
   navigator.clipboard
     .writeText(text)
@@ -326,7 +410,7 @@ copyBtn.addEventListener("click", () => {
 });
 
 downloadBtn.addEventListener("click", () => {
-  const text = joinText(transcript(), interimText).trim();
+  const text = fullText();
   if (!text) return showToast("Nothing to save yet.");
   const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -339,9 +423,9 @@ downloadBtn.addEventListener("click", () => {
 });
 
 clearBtn.addEventListener("click", () => {
-  if (!transcript() && !interimText) return;
-  committedText = "";
-  sessionText = "";
+  if (!fullText()) return;
+  committedSegs = [];
+  sessionSegs = [];
   interimText = "";
   render();
   showToast("🧹 Cleared");
@@ -351,8 +435,9 @@ clearBtn.addEventListener("click", () => {
 /* Keep the transcript in sync when the user edits manually (only when idle) */
 editor.addEventListener("input", () => {
   if (isListening) return;
-  committedText = editor.innerText;
-  sessionText = "";
+  const seg = makeSeg(editor.innerText);
+  committedSegs = seg ? [seg] : [];
+  sessionSegs = [];
   interimText = "";
   updateMeta();
 });
